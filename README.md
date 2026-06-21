@@ -107,8 +107,8 @@ Full CLI and HTTP API reference: **[API.md](API.md)**.
 | **Filename privacy** | The original filename and content type are themselves encrypted; the server stores `redacted`. |
 | **Passphrase** | Never transmitted. Not stored. Not recoverable. |
 | **VirusTotal** | **Opt-in only** — never automatic. The SHA-256 hash is computed client-side and shown locally; it's sent to VirusTotal only on explicit user click. The file is never uploaded to VT. A clear privacy note warns that even a hash query reveals the file's existence — so users can skip it for sensitive, unique files. |
-| **Burn after reading** | The server only deletes the file after the client confirms a *successful* decryption, so a wrong passphrase can never destroy a file. |
-| **Transport** | Bind to localhost + TLS-terminating reverse proxy. Strict CSP, `X-Frame-Options: DENY`, no inline third-party scripts. |
+| **Burn after reading** | The server only deletes the file after the client confirms a *successful* decryption, so a wrong passphrase can never destroy a file. The ciphertext blob is single-use (a server-side lock refuses a second fetch) and is overwritten with random bytes before unlink (best-effort secure delete). |
+| **Transport** | Bind to localhost + TLS-terminating reverse proxy. Strict CSP (`script-src 'self' 'wasm-unsafe-eval'` — no inline scripts; plus `object-src 'none'`, `base-uri 'self'`, `form-action 'self'`), `X-Frame-Options: DENY`. PDF previews run in a sandboxed iframe. |
 | **Rate limiting** | Upload, login and download endpoints are rate-limited against brute force. |
 
 ### What the server *can* see

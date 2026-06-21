@@ -19,7 +19,7 @@ app.set('trust proxy', 1);
 
 // Security headers
 app.use((req, res, next) => {
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'");
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'");
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
@@ -71,10 +71,26 @@ db.exec(`
     content_type_enc TEXT,
     expires_at TEXT,
     nonce TEXT,
-    original_name TEXT
+    original_name TEXT,
+    burn_after_read INTEGER NOT NULL DEFAULT 0,
+    downloaded_at TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_download_token ON files(download_token);
 `);
+
+// Idempotent migration for databases created before burn-after-reading existed.
+// (CREATE TABLE IF NOT EXISTS won't add columns to an already-existing table.)
+(() => {
+  const cols = db.prepare(`PRAGMA table_info(files)`).all().map(c => c.name);
+  if (!cols.includes('burn_after_read')) {
+    db.exec(`ALTER TABLE files ADD COLUMN burn_after_read INTEGER NOT NULL DEFAULT 0`);
+    console.log('[MIGRATE] added column burn_after_read');
+  }
+  if (!cols.includes('downloaded_at')) {
+    db.exec(`ALTER TABLE files ADD COLUMN downloaded_at TEXT`);
+    console.log('[MIGRATE] added column downloaded_at');
+  }
+})();
 
 // Prepared statements
 const stmtInsert = db.prepare(`
@@ -90,6 +106,35 @@ const stmtDelete = db.prepare(`DELETE FROM files WHERE id = ?`);
 // ── Storage ───────────────────────────────────────────────
 const STORAGE_DIR = path.join(__dirname, 'storage');
 if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR, { recursive: true });
+
+// Best-effort secure delete: overwrite the file with random bytes before
+// unlinking, so a casual disk-undelete can't trivially recover the ciphertext.
+// (On copy-on-write / SSD filesystems in-place overwrite isn't guaranteed;
+//  this is defense-in-depth on top of the data already being encrypted.)
+function secureDelete(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return;
+    const size = fs.statSync(filePath).size;
+    if (size > 0) {
+      const fd = fs.openSync(filePath, 'r+');
+      try {
+        const CHUNK = 1 << 20; // 1 MiB
+        let written = 0;
+        while (written < size) {
+          const n = Math.min(CHUNK, size - written);
+          fs.writeSync(fd, crypto.randomBytes(n), 0, n, written);
+          written += n;
+        }
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+    }
+    fs.unlinkSync(filePath);
+  } catch (e) {
+    try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
+  }
+}
 
 const upload = multer({
   dest: STORAGE_DIR,
@@ -481,6 +526,19 @@ app.get('/api/dl/:token/blob', downloadLimiter, (req, res) => {
       return res.status(404).json({ error: 'File data missing' });
     }
 
+    // Single-use lock for burn-after-reading: once the ciphertext has been
+    // served once, refuse further blob fetches. This closes the window where
+    // the blob could be pulled multiple times before the /burn confirmation.
+    // (Defense-in-depth; the actual destruction still happens on /burn after a
+    //  verified client-side decrypt, so a failed/aborted fetch isn't punished
+    //  beyond a single retry being blocked.)
+    if (file.burn_after_read) {
+      if (file.downloaded_at) {
+        return res.status(410).json({ error: 'This burn-after-reading file has already been retrieved.' });
+      }
+      stmtMarkDownloaded.run(file.id);
+    }
+
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Length', file.size_bytes);
     return fs.createReadStream(filePath).pipe(res);
@@ -504,7 +562,7 @@ app.post('/api/dl/:token/burn', downloadLimiter, (req, res) => {
       return res.json({ burned: false, reason: 'not a burn-after-read file' });
     }
     const filePath = path.join(STORAGE_DIR, file.download_token);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    secureDelete(filePath);
     stmtDelete.run(file.id);
     console.log(`[BURN] File #${file.id} self-destructed after read (token:${file.download_token.slice(0,8)}...)`);
     return res.json({ burned: true });
@@ -516,7 +574,7 @@ app.post('/api/dl/:token/burn', downloadLimiter, (req, res) => {
 
 // ── Health ────────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'nyxvault', version: '1.0.0', uptime: process.uptime() });
+  res.json({ status: 'ok', service: 'nyxvault', version: '1.1.2', uptime: process.uptime() });
 });
 
 // ── Session cleanup (every 30min) ─────────────────────────
