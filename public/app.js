@@ -605,38 +605,59 @@ async function uploadFile() {
 
 // ── Download (authenticated) ──────────────────────────────
 async function downloadFile(id) {
-  if (!vaultPassphrase) {
-    toast('No passphrase set', 'error');
+  toast('Downloading…', 'info');
+
+  let encryptedData;
+  try {
+    encryptedData = await fetchWithProgress(`/api/download/${id}`, (received, total) => {
+      const pct = Math.round(received / total * 100);
+      toast(`Downloading… ${pct}%`, 'info');
+    });
+  } catch (err) {
+    toast(`Download failed: ${err.message}`, 'error');
     return;
   }
 
-  toast('Downloading...', 'info');
+  // Try vault passphrase first; on failure prompt for the correct one
+  // (the file may have been uploaded with a custom passphrase).
+  let pw = vaultPassphrase || null;
+  let decrypted = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (!pw) {
+      pw = prompt(attempt === 0
+        ? 'Enter the passphrase for this file:'
+        : 'Wrong passphrase — try again:');
+      if (!pw) { toast('Cancelled', 'info'); return; }
+    }
+    try {
+      toast('Decrypting…', 'info');
+      decrypted = await decryptData(encryptedData, pw, (done, total) => {
+        if (total > 1) toast(`Decrypting chunk ${done}/${total}…`, 'info');
+      });
+      break;
+    } catch {
+      pw = null; // wrong passphrase, ask again
+    }
+  }
+  if (!decrypted) {
+    toast('Decryption failed — wrong passphrase?', 'error');
+    return;
+  }
+
+  // Get filename
+  const row = document.querySelector(`#fileListBody tr[data-id="${id}"]`);
+  let filename = 'decrypted_file';
+  if (row) {
+    const enc = row.dataset.filenameEnc;
+    if (enc && pw) {
+      try { filename = await decryptString(enc, pw); }
+      catch { filename = row.dataset.originalName || 'decrypted_file'; }
+    } else {
+      filename = row.dataset.originalName || 'decrypted_file';
+    }
+  }
 
   try {
-    const encryptedData = await fetchWithProgress(`/api/download/${id}`, (received, total) => {
-      const pct = Math.round(received / total * 100);
-      toast(`Downloading... ${pct}%`, 'info');
-    });
-
-    toast('Decrypting...', 'info');
-    const decrypted = await decryptData(encryptedData, vaultPassphrase, (done, total) => {
-      if (total > 1) toast(`Decrypting chunk ${done}/${total}...`, 'info');
-    });
-
-    // Get filename from row data attributes (no re-fetch needed).
-    const row = document.querySelector(`#fileListBody tr[data-id="${id}"]`);
-    let filename = 'decrypted_file';
-    if (row) {
-      const enc = row.dataset.filenameEnc;
-      if (enc && vaultPassphrase) {
-        try { filename = await decryptString(enc, vaultPassphrase); }
-        catch { filename = row.dataset.originalName || 'decrypted_file'; }
-      } else {
-        filename = row.dataset.originalName || 'decrypted_file';
-      }
-    }
-
-    // Trigger download
     const blob = new Blob([decrypted]);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -646,7 +667,6 @@ async function downloadFile(id) {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-
     toast(`Decrypted: ${filename}`, 'success');
   } catch (err) {
     toast(`Failed: ${err.message}`, 'error');
