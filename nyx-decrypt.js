@@ -85,6 +85,9 @@ async function decryptDataNYX3(data, passphrase) {
     process.stdout.write(`\r  Decrypting chunk ${i + 1}/${numChunks}...`);
   }
   console.log(' done!');
+  // Explicit truncation guard
+  if (offset !== data.length) throw new Error('Integrity error: unexpected trailing data');
+  if (chunks.length !== numChunks) throw new Error('Integrity error: chunk count mismatch');
   return Buffer.concat(chunks, totalDecrypted);
 }
 
@@ -136,10 +139,15 @@ async function main() {
   const inputFile = process.argv[2];
   const outputFile = process.argv[4] || null;
 
-  if (!inputFile) {
+  const allowLegacy = process.argv.includes('--allow-legacy');
+
+  if (!inputFile || inputFile === '--help' || inputFile === '-h') {
     console.log('NyxVault Decrypt CLI');
-    console.log('Usage: node nyx-decrypt.js <encrypted-file> [passphrase] [output-file]');
+    console.log('Usage: node nyx-decrypt.js <encrypted-file> [passphrase] [output-file] [--allow-legacy]');
     console.log('Env:   NYXVAULT_PASSPHRASE (used if passphrase arg omitted)');
+    console.log('');
+    console.log('  --allow-legacy   Allow decryption of NYX2 files (no integrity protection).');
+    console.log('                   Use nyx-migrate.js to upgrade NYX2 → NYX3 instead.');
     process.exit(1);
   }
   if (!PASSPHRASE) {
@@ -154,6 +162,13 @@ async function main() {
   if (isNYX3(encData)) {
     decrypted = await decryptDataNYX3(encData, PASSPHRASE);
   } else if (isNYX2(encData)) {
+    if (!allowLegacy) {
+      console.error('❌ This file uses the legacy NYX2 format without integrity protection.');
+      console.error('   To migrate it to NYX3: node nyx-migrate.js ' + inputFile + ' <passphrase>');
+      console.error('   To decrypt anyway (UNSAFE): add --allow-legacy flag');
+      process.exit(1);
+    }
+    console.warn('  ⚠️  WARNING: Decrypting NYX2 file without integrity checks (--allow-legacy)');
     decrypted = await decryptDataNYX2(encData, PASSPHRASE);
   } else {
     decrypted = await decryptDataLegacy(encData, PASSPHRASE);

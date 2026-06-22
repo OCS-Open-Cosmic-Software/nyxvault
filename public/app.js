@@ -181,44 +181,17 @@ async function decryptDataNYX3(data, passphrase, onProgress) {
     if (onProgress) onProgress(i + 1, numChunks);
   }
 
-  const result = new Uint8Array(totalDecrypted);
-  let pos = 0;
-  for (const chunk of chunks) { result.set(chunk, pos); pos += chunk.length; }
-  return result;
-}
-
-// ── Chunked Decrypt (NYX2 legacy — no integrity checks) ─────
-async function decryptDataNYX2(data, passphrase, onProgress) {
-  let offset = 4; // skip magic
-  const salt = data.slice(offset, offset + SALT_BYTES); offset += SALT_BYTES;
-  const numChunks = (data[offset] << 24) | (data[offset+1] << 16) | (data[offset+2] << 8) | data[offset+3];
-  offset += 4;
-
-  const key = await deriveKey(passphrase, salt);
-  const chunks = [];
-  let totalDecrypted = 0;
-
-  for (let i = 0; i < numChunks; i++) {
-    const nonce = data.slice(offset, offset + NONCE_BYTES); offset += NONCE_BYTES;
-    let ciphertextLen;
-    if (i < numChunks - 1) {
-      ciphertextLen = CHUNK_SIZE + SECRETBOX_OVERHEAD;
-    } else {
-      ciphertextLen = data.length - offset;
-    }
-    const ciphertext = data.slice(offset, offset + ciphertextLen); offset += ciphertextLen;
-    const decrypted = nacl.secretbox.open(ciphertext, nonce, key);
-    if (!decrypted) throw new Error('Decryption failed – wrong passphrase?');
-    chunks.push(decrypted);
-    totalDecrypted += decrypted.length;
-    if (onProgress) onProgress(i + 1, numChunks);
-  }
+  // Explicit truncation guard: verify we consumed all data and saw exactly one final chunk
+  if (offset !== data.length) throw new Error('Integrity error: unexpected trailing data');
+  if (chunks.length !== numChunks) throw new Error('Integrity error: chunk count mismatch');
 
   const result = new Uint8Array(totalDecrypted);
   let pos = 0;
   for (const chunk of chunks) { result.set(chunk, pos); pos += chunk.length; }
   return result;
 }
+
+
 
 // ── Encrypt (auto-selects chunked for large files, legacy for small strings) ─────
 async function encryptData(data, passphrase, onProgress) {
@@ -246,7 +219,7 @@ async function decryptData(encryptedBlob, passphrase, onProgress) {
     return decryptDataNYX3(encryptedBlob, passphrase, onProgress);
   }
   if (isNYX2(encryptedBlob)) {
-    return decryptDataNYX2(encryptedBlob, passphrase, onProgress);
+    throw new Error('This file uses the legacy NYX2 format without integrity protection. Migrate it to NYX3 first using: node nyx-migrate.js <file> <passphrase>');
   }
   // Legacy format — try 16MB first, then 64MB for old files
   const salt = encryptedBlob.slice(0, SALT_BYTES);

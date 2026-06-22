@@ -53,27 +53,9 @@
       chunks.push(actual); total += actual.length;
       if (onProgress) onProgress(i+1, numChunks);
     }
-    const result = new Uint8Array(total); let pos = 0;
-    for (const c of chunks){ result.set(c, pos); pos += c.length; }
-    return result;
-  }
-
-  // NYX2 decrypt (legacy, no integrity checks)
-  async function decryptDataNYX2(data, passphrase, onProgress) {
-    let offset = 4;
-    const salt = data.slice(offset, offset+SALT_BYTES); offset += SALT_BYTES;
-    const numChunks = (data[offset]<<24)|(data[offset+1]<<16)|(data[offset+2]<<8)|data[offset+3]; offset += 4;
-    const key = await deriveKey(passphrase, salt);
-    const chunks = []; let total = 0;
-    for (let i=0; i<numChunks; i++) {
-      const nonce = data.slice(offset, offset+NONCE_BYTES); offset += NONCE_BYTES;
-      const ctLen = (i < numChunks-1) ? CHUNK_SIZE+SECRETBOX_OVERHEAD : data.length-offset;
-      const ct = data.slice(offset, offset+ctLen); offset += ctLen;
-      const dec = nacl.secretbox.open(ct, nonce, key);
-      if (!dec) throw new Error('Decryption failed \u2013 wrong passphrase?');
-      chunks.push(dec); total += dec.length;
-      if (onProgress) onProgress(i+1, numChunks);
-    }
+    // Explicit truncation guard
+    if (offset !== data.length) throw new Error('Integrity error: unexpected trailing data');
+    if (chunks.length !== numChunks) throw new Error('Integrity error: chunk count mismatch');
     const result = new Uint8Array(total); let pos = 0;
     for (const c of chunks){ result.set(c, pos); pos += c.length; }
     return result;
@@ -81,7 +63,7 @@
 
   async function decryptData(blob, passphrase, onProgress) {
     if (isNYX3(blob)) return decryptDataNYX3(blob, passphrase, onProgress);
-    if (isNYX2(blob)) return decryptDataNYX2(blob, passphrase, onProgress);
+    if (isNYX2(blob)) throw new Error('This file uses the legacy NYX2 format without integrity protection. Ask the uploader to migrate it using: node nyx-migrate.js');
     const salt = blob.slice(0, SALT_BYTES);
     const nonce = blob.slice(SALT_BYTES, SALT_BYTES+NONCE_BYTES);
     const ct = blob.slice(SALT_BYTES+NONCE_BYTES);

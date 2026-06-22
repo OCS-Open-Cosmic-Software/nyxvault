@@ -2,6 +2,28 @@
 
 All notable changes to NyxVault are documented here.
 
+## [2.0.1] — 2026-06-22
+
+### 🛡️ Anti-Downgrade: NYX2 Legacy Path Removed from Browser
+
+Addresses a downgrade attack vector identified post-release: an attacker who can modify a blob (compromised server, MitM) could overwrite the magic bytes from `NYX3` to `NYX2`, causing the client to silently use the legacy code path without integrity checks — bypassing all NYX3 protections.
+
+#### Fixed
+- **Browser (app.js, dl-page.js):** NYX2 blobs are now **rejected** with a clear error message instead of silently decrypted. This eliminates the downgrade attack surface entirely.
+- **CLI (nyx-decrypt.js):** NYX2 decryption is **blocked by default**. Use `--allow-legacy` flag to explicitly opt in (needed for migration).
+
+#### Added
+- **`nyx-migrate.js`** — CLI tool to migrate NYX2 blobs to NYX3 format.
+  - Single file: `node nyx-migrate.js <file> <passphrase> [output]`
+  - Server-wide: `node nyx-migrate.js --server <passphrase>` (re-encrypts all NYX2 blobs in `storage/`, creates `.nyx2bak` backups)
+
+#### Migration Guide
+1. Run `node nyx-migrate.js --server '<passphrase>'` for each passphrase in use.
+2. Verify migrated files work: `node nyx-decrypt.js <file> <passphrase>`.
+3. After confirming, delete `.nyx2bak` backup files.
+
+---
+
 ## [2.0.0] — 2026-06-22
 
 ### 🔐 Security — NYX3 Encryption Format
